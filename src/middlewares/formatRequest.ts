@@ -177,11 +177,7 @@ export const formatRequest = async (
     if (stream) {
       res.setHeader("Content-Type", "text/event-stream");
     }
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    req.body = data;
-    console.log(JSON.stringify(data.messages, null, 2));
-  } catch (error) {
+    res.setHeader("Cache-Control", "no-cache");    res.setHeader("Connection", "keep-alive");    // Responses API 用にリクエストボディを再構築    const newRequestBody = {      model: data.model,      instructions: Array.isArray(system) ? system.map(s => s.text).join('\n') : String(system),      input: data.messages.filter((m: any) => m.role !== 'system'), // system メッセージは instructions に移動したため除外      tools: [{ type: "web_search_preview" }],      stream: true,      temperature: data.temperature,    };    req.body = newRequestBody;    console.log(JSON.stringify(newRequestBody, null, 2));  } catch (error) {
     console.error("Error in request processing:", error);
     const errorCompletion: AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk> =
       {
