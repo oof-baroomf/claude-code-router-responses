@@ -1,44 +1,12 @@
 import { Response } from "express";
-import { OpenAI } from "openai";
 import { log } from "./log";
 
-interface ContentBlock {
+// A simplified interface for the events we care about
+interface HandledEvent {
   type: string;
-  id?: string;
-  name?: string;
-  input?: any;
-  text?: string;
-}
-
-interface MessageEvent {
-  type: string;
-  message?: {
-    id: string;
-    type: string;
-    role: string;
-    content: any[];
-    model: string;
-    stop_reason: string | null;
-    stop_sequence: string | null;
-    usage: {
-      input_tokens: number;
-      output_tokens: number;
-    };
-  };
-  delta?: {
-    stop_reason?: string;
-    stop_sequence?: string | null;
-    content?: ContentBlock[];
-    type?: string;
-    text?: string;
-    partial_json?: string;
-  };
-  index?: number;
-  content_block?: ContentBlock;
-  usage?: {
-    input_tokens: number;
-    output_tokens: number;
-  };
+  delta?: { text: string };
+  response?: { status: string };
+  error?: { message: string };
 }
 
 export async function streamOpenAIResponse(
@@ -55,11 +23,10 @@ export async function streamOpenAIResponse(
   const messageId = `msg_${Date.now()}`;
   const contentBlockId = `content-block-${Date.now()}`;
   let hasTextBlockStarted = false;
-  let stopReason = "end_turn"; // Default stop reason
 
   try {
-    // 1. Send message_start event
-    const messageStart: MessageEvent = {
+    // Send message_start event immediately
+    const messageStart = {
       type: "message_start",
       message: {
         id: messageId,
@@ -75,19 +42,21 @@ export async function streamOpenAIResponse(
     write(`event: message_start\ndata: ${JSON.stringify(messageStart)}\n\n`);
 
     for await (const event of stream) {
+      log("event received", JSON.stringify(event, null, 2));
+
       switch (event.type) {
         case 'response.output_text.delta':
           if (!hasTextBlockStarted) {
-            // 2. Send content_block_start for the first text delta
-            const textBlockStart = {
+            // If this is the first text delta, send content_block_start
+            const contentBlockStart = {
               type: 'content_block_start',
               index: 0,
               content_block: { type: 'text', id: contentBlockId, text: '' },
             };
-            write(`event: content_block_start\ndata: ${JSON.stringify(textBlockStart)}\n\n`);
+            write(`event: content_block_start\ndata: ${JSON.stringify(contentBlockStart)}\n\n`);
             hasTextBlockStarted = true;
           }
-          // 3. Send content_block_delta for each text chunk
+          // Send the actual text chunk
           const contentDelta = {
             type: 'content_block_delta',
             index: 0,
@@ -96,36 +65,41 @@ export async function streamOpenAIResponse(
           write(`event: content_block_delta\ndata: ${JSON.stringify(contentDelta)}\n\n`);
           break;
 
-        case 'response.tool_call.done':
-          // If we ever support tool calls, this is where we'd update the stop_reason
-          stopReason = "tool_use";
-          break;
-
-        case 'response.done':
+        case 'response.completed':
           if (hasTextBlockStarted) {
-            // 4. Send content_block_stop if a text block was started
+            // Stop the text block if it was started
             const contentBlockStop = {
               type: 'content_block_stop',
               index: 0,
             };
             write(`event: content_block_stop\ndata: ${JSON.stringify(contentBlockStop)}\n\n`);
           }
-          // 5. Send message_delta with the final stop_reason
+
+          // Send message_delta with the final stop reason
           const messageDelta = {
             type: 'message_delta',
             delta: {
-              stop_reason: stopReason,
+              stop_reason: 'end_turn', // Derived from 'completed' status
               stop_sequence: null,
             },
-            usage: { output_tokens: 1 }, // Dummy usage
+            usage: { output_tokens: event.response?.usage?.output_tokens || 1 },
           };
           write(`event: message_delta\ndata: ${JSON.stringify(messageDelta)}\n\n`);
           break;
 
         case 'response.error':
           log('Stream error:', event.error);
-          const errorJson = JSON.stringify({ type: 'error', error: { type: 'api_error', message: event.error.message } });
+          const errorJson = JSON.stringify({ type: 'error', error: { type: 'api_error', message: event.error?.message || 'Unknown error' } });
           write(`event: error\ndata: ${errorJson}\n\n`);
+          break;
+
+        // Other events are logged but ignored for the client-side stream
+        case 'response.created':
+        case 'response.in_progress':
+        case 'response.web_search_call.in_progress':
+        case 'response.web_search_call.searching':
+        case 'response.web_search_call.completed':
+        case 'response.output_text.done':
           break;
       }
     }
@@ -134,10 +108,8 @@ export async function streamOpenAIResponse(
     const errorJson = JSON.stringify({ type: 'error', error: { type: 'internal_server_error', message: e.message } });
     write(`event: error\ndata: ${errorJson}\n\n`);
   } finally {
-    // 6. Send message_stop event
-    const messageStop: MessageEvent = {
-      type: "message_stop",
-    };
+    // Finally, send the message_stop event
+    const messageStop = { type: "message_stop" };
     write(`event: message_stop\ndata: ${JSON.stringify(messageStop)}\n\n`);
     res.end();
   }
