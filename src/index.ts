@@ -1,23 +1,21 @@
 import { existsSync } from "fs";
 import { writeFile } from "fs/promises";
-import { getOpenAICommonOptions, initConfig, initDir } from "./utils";
+import { homedir } from "os";
+import { join } from "path";
+import { initConfig, initDir } from "./utils";
 import { createServer } from "./server";
-import { formatRequest } from "./middlewares/formatRequest";
-import { rewriteBody } from "./middlewares/rewriteBody";
-import { router } from "./middlewares/router";
-import OpenAI from "openai";
-import { streamOpenAIResponse } from "./utils/stream";
+import { router } from "./utils/router";
+import { apiKeyAuth } from "./middleware/auth";
 import {
   cleanupPidFile,
   isServiceRunning,
   savePid,
 } from "./utils/processCheck";
-import { LRUCache } from "lru-cache";
-import { log } from "./utils/log";
+import { CONFIG_FILE } from "./constants";
 
 async function initializeClaudeConfig() {
-  const homeDir = process.env.HOME;
-  const configPath = `${homeDir}/.claude.json`;
+  const homeDir = homedir();
+  const configPath = join(homeDir, ".claude.json");
   if (!existsSync(configPath)) {
     const userID = Array.from(
       { length: 64 },
@@ -39,13 +37,6 @@ interface RunOptions {
   port?: number;
 }
 
-interface ModelProvider {
-  name: string;
-  api_base_url: string;
-  api_key: string;
-  models: string[];
-}
-
 async function run(options: RunOptions = {}) {
   // Check if service is already running
   if (isServiceRunning()) {
@@ -56,53 +47,16 @@ async function run(options: RunOptions = {}) {
   await initializeClaudeConfig();
   await initDir();
   const config = await initConfig();
+  let HOST = config.HOST;
 
-  const Providers = new Map<string, ModelProvider>();
-  const providerCache = new LRUCache<string, OpenAI>({
-    max: 10,
-    ttl: 2 * 60 * 60 * 1000,
-  });
-
-  function getProviderInstance(providerName: string): OpenAI {
-    const provider: ModelProvider | undefined = Providers.get(providerName);
-    if (provider === undefined) {
-      throw new Error(`Provider ${providerName} not found`);
-    }
-    let openai = providerCache.get(provider.name);
-    if (!openai) {
-      openai = new OpenAI({
-        baseURL: provider.api_base_url,
-        apiKey: provider.api_key,
-        ...getOpenAICommonOptions(),
-      });
-      providerCache.set(provider.name, openai);
-    }
-    return openai;
+  if (config.HOST && !config.APIKEY) {
+    HOST = "127.0.0.1";
+    console.warn(
+      "⚠️ API key is not set. HOST is forced to 127.0.0.1."
+    );
   }
 
-  if (Array.isArray(config.Providers)) {
-    config.Providers.forEach((provider) => {
-      try {
-        Providers.set(provider.name, provider);
-      } catch (error) {
-        console.error("Failed to parse model provider:", error);
-      }
-    });
-  }
-
-  if (config.OPENAI_API_KEY && config.OPENAI_BASE_URL && config.OPENAI_MODEL) {
-    const defaultProvider = {
-      name: "default",
-      api_base_url: config.OPENAI_BASE_URL,
-      api_key: config.OPENAI_API_KEY,
-      models: [config.OPENAI_MODEL],
-    };
-    Providers.set("default", defaultProvider);
-  } else if (Providers.size > 0) {
-    const defaultProvider = Providers.values().next().value!;
-    Providers.set("default", defaultProvider);
-  }
-  const port = options.port || 3456;
+  const port = config.PORT || 3456;
 
   // Save the PID of the background process
   savePid(process.pid);
@@ -119,11 +73,13 @@ async function run(options: RunOptions = {}) {
     cleanupPidFile();
     process.exit(0);
   });
+  console.log(HOST)
 
   // Use port from environment variable if set (for background process)
   const servicePort = process.env.SERVICE_PORT
     ? parseInt(process.env.SERVICE_PORT)
     : port;
+<<<<<<< HEAD
 
   const server = await createServer(servicePort);
   server.useMiddleware((req, res, next) => {
@@ -154,9 +110,27 @@ async function run(options: RunOptions = {}) {
     } catch (e) {
       log("Error in OpenAI API call:", e);
     }
+=======
+  const server = createServer({
+    jsonPath: CONFIG_FILE,
+    initialConfig: {
+      // ...config,
+      providers: config.Providers || config.providers,
+      HOST: HOST,
+      PORT: servicePort,
+      LOG_FILE: join(
+        homedir(),
+        ".claude-code-router",
+        "claude-code-router.log"
+      ),
+    },
+>>>>>>> main
   });
+  server.addHook("preHandler", apiKeyAuth(config));
+  server.addHook("preHandler", async (req, reply) =>
+    router(req, reply, config)
+  );
   server.start();
-  console.log(`🚀 Claude Code Router is running on port ${servicePort}`);
 }
 
 export { run };
